@@ -2,7 +2,7 @@ import { TextEncoder } from "node:util";
 
 import { z } from "zod";
 
-import { DEFAULT_GEMINI_MODEL, getGeminiClient } from "@/lib/gemini";
+import { streamWithFallback } from "@/lib/gemini";
 import { parseReportMarkdown } from "@/lib/markdown-parser";
 import { loadPromptInputs } from "@/lib/prompt-loader";
 import { createSupabaseAdminClient } from "@/lib/supabase";
@@ -181,21 +181,15 @@ export async function POST(request: Request) {
       const emittedSections = new Set<string>();
       let fullText = "";
 
-      controller.enqueue(
-        sseChunk("start", {
-          model: DEFAULT_GEMINI_MODEL,
-          hasProfile: promptInputs.profile !== null,
-        })
-      );
-
       try {
-        const genAI = getGeminiClient();
-        const model = genAI.getGenerativeModel({
-          model: DEFAULT_GEMINI_MODEL,
-          generationConfig: { maxOutputTokens: 8192 },
-        });
+        const { modelName, result } = await streamWithFallback(prompt, { maxOutputTokens: 8192 });
 
-        const result = await model.generateContentStream(prompt);
+        controller.enqueue(
+          sseChunk("start", {
+            model: modelName,
+            hasProfile: promptInputs.profile !== null,
+          })
+        );
 
         for await (const chunk of result.stream) {
           const textDelta = chunk.text();
