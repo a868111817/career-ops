@@ -1,8 +1,54 @@
-import { notFound } from "next/navigation";
 import { ArrowUpRight, FileText } from "lucide-react";
+import { notFound } from "next/navigation";
 
 import { ReportBlockCard } from "@/components/evaluation/report-block-card";
 import { loadReportBySlug } from "@/lib/local-data";
+import { parseReportMarkdown } from "@/lib/markdown-parser";
+import { createSupabaseServerClient } from "@/lib/supabase";
+
+type Block = { key: string; title: string; content: string };
+
+type ReportView = {
+  company: string;
+  role: string;
+  reportDate: string | null;
+  score: number | null;
+  archetype: string | null;
+  sourceUrl: string | null;
+  blocks: Block[];
+};
+
+async function loadReportFromDb(slug: string): Promise<ReportView | null> {
+  try {
+    const db = createSupabaseServerClient();
+    const { data } = await db
+      .from("reports")
+      .select("company, role, report_date, score, archetype, source_url, raw_markdown, blocks")
+      .eq("slug", slug)
+      .maybeSingle();
+
+    if (!data) return null;
+
+    let blocks: Block[] = [];
+    if (Array.isArray(data.blocks)) {
+      blocks = data.blocks as Block[];
+    } else if (data.raw_markdown) {
+      blocks = parseReportMarkdown(data.raw_markdown).blocks;
+    }
+
+    return {
+      company: data.company,
+      role: data.role,
+      reportDate: data.report_date,
+      score: data.score,
+      archetype: data.archetype,
+      sourceUrl: data.source_url,
+      blocks,
+    };
+  } catch {
+    return null;
+  }
+}
 
 export default async function ReportDetailPage({
   params,
@@ -10,7 +56,24 @@ export default async function ReportDetailPage({
   params: Promise<{ id: string }>;
 }) {
   const { id } = await params;
-  const report = await loadReportBySlug(id);
+
+  // Try Supabase first (reports saved from web app)
+  const dbReport = await loadReportFromDb(id);
+
+  // Fall back to local markdown files (migrated reports)
+  const localReport = dbReport ? null : await loadReportBySlug(id);
+
+  const report: ReportView | null = dbReport ?? (localReport
+    ? {
+        company: localReport.company,
+        role: localReport.role,
+        reportDate: localReport.reportDate,
+        score: localReport.score,
+        archetype: localReport.archetype,
+        sourceUrl: localReport.sourceUrl,
+        blocks: localReport.blocks,
+      }
+    : null);
 
   if (!report) {
     notFound();
@@ -44,6 +107,8 @@ export default async function ReportDetailPage({
             {report.sourceUrl ? (
               <a
                 href={report.sourceUrl}
+                target="_blank"
+                rel="noreferrer"
                 className="rounded-[1.3rem] border border-slate-200 px-4 py-4 text-slate-800 transition hover:border-slate-950"
               >
                 <div className="text-xs uppercase tracking-[0.16em] text-slate-500">Source</div>

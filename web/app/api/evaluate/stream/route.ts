@@ -3,13 +3,17 @@ import { TextEncoder } from "node:util";
 import { z } from "zod";
 
 import { DEFAULT_GEMINI_MODEL, getGeminiClient } from "@/lib/gemini";
+import { parseReportMarkdown } from "@/lib/markdown-parser";
 import { loadPromptInputs } from "@/lib/prompt-loader";
+import { createSupabaseAdminClient } from "@/lib/supabase";
 
 export const runtime = "nodejs";
 
 const requestSchema = z.object({
   jobDescription: z.string().min(1),
   sourceUrl: z.string().url().optional(),
+  company: z.string().optional(),
+  role: z.string().optional(),
 });
 
 type SectionState = {
@@ -71,10 +75,86 @@ function buildEvaluationPrompt(input: {
     "## E) Personalization Plan",
     "## F) Interview Plan",
     "",
+    "In section B) CV Match, include a line in the format: **Score: X.X/5** where X.X is your numeric assessment.",
+    "In section A) Role Summary, include a line in the format: **Archetype: <archetype>** identifying the role archetype.",
+    "",
     "Preserve markdown headings exactly so the frontend can parse the sections while streaming.",
   ]
     .filter(Boolean)
     .join("\n");
+}
+
+function slugify(text: string) {
+  return text
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-|-$/g, "")
+    .slice(0, 40);
+}
+
+async function saveToDatabase(opts: {
+  fullText: string;
+  company: string;
+  role: string;
+  sourceUrl?: string;
+}) {
+  const db = createSupabaseAdminClient();
+  const parsed = parseReportMarkdown(opts.fullText);
+  const today = new Date().toISOString().slice(0, 10);
+
+  const { data: maxReport } = await db
+    .from("reports")
+    .select("seq_num")
+    .order("seq_num", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  const reportSeqNum = (maxReport?.seq_num ?? 0) + 1;
+  const slug = `${String(reportSeqNum).padStart(3, "0")}-${slugify(opts.company)}-${today}`;
+
+  const { data: reportRow, error: reportError } = await db
+    .from("reports")
+    .insert({
+      seq_num: reportSeqNum,
+      company: opts.company,
+      role: opts.role,
+      report_date: today,
+      slug,
+      raw_markdown: opts.fullText,
+      blocks: parsed.blocks as never,
+      score: parsed.metadata.score,
+      archetype: parsed.metadata.archetype,
+      source_url: opts.sourceUrl ?? null,
+    })
+    .select("id")
+    .single();
+
+  if (reportError) {
+    throw new Error(`Failed to save report: ${reportError.message}`);
+  }
+
+  const { data: maxApp } = await db
+    .from("applications")
+    .select("seq_num")
+    .order("seq_num", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  const appSeqNum = (maxApp?.seq_num ?? 0) + 1;
+
+  await db.from("applications").insert({
+    seq_num: appSeqNum,
+    applied_at: today,
+    company: opts.company,
+    role: opts.role,
+    score: parsed.metadata.score,
+    status: "evaluated",
+    report_id: reportRow.id,
+    source_url: opts.sourceUrl ?? null,
+    archetype: parsed.metadata.archetype,
+  });
+
+  return { reportId: reportRow.id, reportSlug: slug };
 }
 
 export async function POST(request: Request) {
@@ -88,11 +168,12 @@ export async function POST(request: Request) {
     );
   }
 
+  const { jobDescription, sourceUrl, company, role } = parsed.data;
   const promptInputs = await loadPromptInputs();
   const prompt = buildEvaluationPrompt({
     combinedPromptSections: promptInputs.combinedPromptSections,
-    jobDescription: parsed.data.jobDescription,
-    sourceUrl: parsed.data.sourceUrl,
+    jobDescription,
+    sourceUrl,
   });
 
   const stream = new ReadableStream<Uint8Array>({
@@ -144,7 +225,30 @@ export async function POST(request: Request) {
           );
         }
 
-        controller.enqueue(sseChunk("complete", { fullText }));
+        // Save to DB
+        const resolvedCompany = company || "Unknown Company";
+        const resolvedRole = role || "Unknown Role";
+        let savedInfo: { reportId: string; reportSlug: string } | null = null;
+
+        try {
+          savedInfo = await saveToDatabase({
+            fullText,
+            company: resolvedCompany,
+            role: resolvedRole,
+            sourceUrl,
+          });
+        } catch (dbError) {
+          const msg = dbError instanceof Error ? dbError.message : "DB save failed";
+          controller.enqueue(sseChunk("warning", { message: msg }));
+        }
+
+        controller.enqueue(
+          sseChunk("complete", {
+            fullText,
+            reportId: savedInfo?.reportId ?? null,
+            reportSlug: savedInfo?.reportSlug ?? null,
+          })
+        );
       } catch (error) {
         const message = error instanceof Error ? error.message : "Unknown evaluation error";
         controller.enqueue(sseChunk("error", { message }));

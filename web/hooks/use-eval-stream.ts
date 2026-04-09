@@ -15,6 +15,12 @@ type StartEvent = {
   hasProfile: boolean;
 };
 
+type CompleteEvent = {
+  fullText: string;
+  reportId: string | null;
+  reportSlug: string | null;
+};
+
 function parseEventChunk(chunk: string) {
   const eventMatch = chunk.match(/^event:\s*(.+)$/m);
   const dataMatch = chunk.match(/^data:\s*(.+)$/m);
@@ -25,7 +31,7 @@ function parseEventChunk(chunk: string) {
 
   return {
     event: eventMatch[1].trim(),
-    data: JSON.parse(dataMatch[1]),
+    data: JSON.parse(dataMatch[1]) as unknown,
   };
 }
 
@@ -34,20 +40,27 @@ export function useEvalStream() {
   const [text, setText] = useState("");
   const [sections, setSections] = useState<StreamSection[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [warning, setWarning] = useState<string | null>(null);
   const [startEvent, setStartEvent] = useState<StartEvent | null>(null);
+  const [completeEvent, setCompleteEvent] = useState<CompleteEvent | null>(null);
 
-  const runEvaluation = async (input: { jobDescription: string; sourceUrl?: string }) => {
+  const runEvaluation = async (input: {
+    jobDescription: string;
+    sourceUrl?: string;
+    company?: string;
+    role?: string;
+  }) => {
     setStatus("running");
     setText("");
     setSections([]);
     setError(null);
+    setWarning(null);
     setStartEvent(null);
+    setCompleteEvent(null);
 
     const response = await fetch("/api/evaluate/stream", {
       method: "POST",
-      headers: {
-        "content-type": "application/json",
-      },
+      headers: { "content-type": "application/json" },
       body: JSON.stringify(input),
     });
 
@@ -64,9 +77,7 @@ export function useEvalStream() {
     while (true) {
       const { done, value } = await reader.read();
 
-      if (done) {
-        break;
-      }
+      if (done) break;
 
       buffer += decoder.decode(value, { stream: true });
       const chunks = buffer.split("\n\n");
@@ -75,29 +86,33 @@ export function useEvalStream() {
       for (const chunk of chunks) {
         const parsed = parseEventChunk(chunk);
 
-        if (!parsed) {
-          continue;
-        }
+        if (!parsed) continue;
 
         if (parsed.event === "start") {
-          setStartEvent(parsed.data);
+          setStartEvent(parsed.data as StartEvent);
         }
 
         if (parsed.event === "text_delta") {
-          setText((current) => current + parsed.data.textDelta);
+          setText((current) => current + (parsed.data as { textDelta: string }).textDelta);
         }
 
         if (parsed.event === "section_complete") {
-          setSections((current) => [...current, parsed.data]);
+          setSections((current) => [...current, parsed.data as StreamSection]);
+        }
+
+        if (parsed.event === "warning") {
+          setWarning((parsed.data as { message: string }).message);
         }
 
         if (parsed.event === "error") {
           setStatus("error");
-          setError(parsed.data.message);
+          setError((parsed.data as { message: string }).message);
         }
 
         if (parsed.event === "complete") {
-          setText(parsed.data.fullText);
+          const ev = parsed.data as CompleteEvent;
+          setText(ev.fullText);
+          setCompleteEvent(ev);
           setStatus("completed");
         }
       }
@@ -111,7 +126,9 @@ export function useEvalStream() {
     text,
     sections,
     error,
+    warning,
     startEvent,
+    completeEvent,
     runEvaluation,
   };
 }
