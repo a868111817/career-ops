@@ -3,6 +3,8 @@ import path from "node:path";
 
 import yaml from "js-yaml";
 
+import { createSupabaseAdminClient } from "@/lib/supabase";
+
 type LoadTextOptions = {
   optional?: boolean;
 };
@@ -53,13 +55,49 @@ export async function loadModePrompt(modeName: string): Promise<string> {
   return content;
 }
 
+// Read cv.md from Supabase settings (deployed) or filesystem (local dev)
 export async function loadCvMarkdown(): Promise<string> {
-  const content = await readTextFile(CV_PATH);
-  if (!content) throw new Error(`cv.md not found at ${CV_PATH}`);
-  return content;
+  try {
+    const db = createSupabaseAdminClient();
+    const { data } = await db
+      .from("settings")
+      .select("value")
+      .eq("key", "cv_markdown")
+      .maybeSingle();
+
+    if (data?.value && typeof data.value === "string" && data.value.trim()) {
+      return data.value;
+    }
+  } catch {
+    // fall through to filesystem
+  }
+
+  const content = await readTextFile(CV_PATH, { optional: true });
+  if (content) return content;
+
+  throw new Error(
+    "cv.md not found. Please upload your CV via the CV editor or run the migration script."
+  );
 }
 
-export async function loadProfileYaml() {
+// Read profile from Supabase settings (deployed) or filesystem (local dev)
+export async function loadProfileYaml(): Promise<string | null> {
+  try {
+    const db = createSupabaseAdminClient();
+    const { data } = await db
+      .from("settings")
+      .select("value")
+      .eq("key", "profile")
+      .maybeSingle();
+
+    if (data?.value && typeof data.value === "object" && data.value !== null) {
+      // Stored as parsed JSON in Supabase; convert back to YAML string for the prompt
+      return yaml.dump(data.value);
+    }
+  } catch {
+    // fall through to filesystem
+  }
+
   return readTextFile(PROFILE_PATH, { optional: true });
 }
 
