@@ -78,6 +78,7 @@ function buildEvaluationPrompt(input: {
     "In section B) CV Match, include a line in the format: **Score: X.X/5** where X.X is your numeric assessment.",
     "In section A) Role Summary, include a line in the format: **Archetype: <archetype>** identifying the role archetype.",
     "",
+    "Respond entirely in Traditional Chinese (繁體中文，台灣用語)。所有內容包括分析、建議、說明皆須使用繁體中文。",
     "Preserve markdown headings exactly so the frontend can parse the sections while streaming.",
   ]
     .filter(Boolean)
