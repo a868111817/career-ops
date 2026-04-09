@@ -2,7 +2,7 @@ import { TextEncoder } from "node:util";
 
 import { z } from "zod";
 
-import { DEFAULT_ANTHROPIC_MODEL, getAnthropicClient } from "@/lib/anthropic";
+import { DEFAULT_GEMINI_MODEL, getGeminiClient } from "@/lib/gemini";
 import { loadPromptInputs } from "@/lib/prompt-loader";
 
 export const runtime = "nodejs";
@@ -33,17 +33,13 @@ function detectCompletedSections(markdown: string, emittedSections: Set<string>)
     const match = matches[index];
     const next = matches[index + 1];
 
-    if (!next) {
-      continue;
-    }
+    if (!next) continue;
 
     const start = (match.index ?? 0) + match[0].length;
     const end = next.index ?? markdown.length;
     const key = match[1];
 
-    if (emittedSections.has(key)) {
-      continue;
-    }
+    if (emittedSections.has(key)) continue;
 
     sections.push({
       key,
@@ -87,16 +83,8 @@ export async function POST(request: Request) {
 
   if (!parsed.success) {
     return new Response(
-      JSON.stringify({
-        error: "Invalid request body",
-        issues: parsed.error.flatten(),
-      }),
-      {
-        status: 400,
-        headers: {
-          "content-type": "application/json",
-        },
-      }
+      JSON.stringify({ error: "Invalid request body", issues: parsed.error.flatten() }),
+      { status: 400, headers: { "content-type": "application/json" } }
     );
   }
 
@@ -114,25 +102,24 @@ export async function POST(request: Request) {
 
       controller.enqueue(
         sseChunk("start", {
-          model: DEFAULT_ANTHROPIC_MODEL,
+          model: DEFAULT_GEMINI_MODEL,
           hasProfile: promptInputs.profile !== null,
         })
       );
 
       try {
-        const anthropic = getAnthropicClient();
-        const messageStream = anthropic.messages.stream({
-          model: DEFAULT_ANTHROPIC_MODEL,
-          max_tokens: 4000,
-          messages: [
-            {
-              role: "user",
-              content: prompt,
-            },
-          ],
+        const genAI = getGeminiClient();
+        const model = genAI.getGenerativeModel({
+          model: DEFAULT_GEMINI_MODEL,
+          generationConfig: { maxOutputTokens: 8192 },
         });
 
-        messageStream.on("text", (textDelta) => {
+        const result = await model.generateContentStream(prompt);
+
+        for await (const chunk of result.stream) {
+          const textDelta = chunk.text();
+          if (!textDelta) continue;
+
           fullText += textDelta;
           controller.enqueue(sseChunk("text_delta", { textDelta }));
 
@@ -141,18 +128,9 @@ export async function POST(request: Request) {
             emittedSections.add(section.key);
             controller.enqueue(sseChunk("section_complete", section));
           }
-        });
-
-        const finalMessage = await messageStream.finalMessage();
-        const finalText = finalMessage.content
-          .filter((block) => block.type === "text")
-          .map((block) => block.text)
-          .join("");
-
-        if (finalText && finalText.length > fullText.length) {
-          fullText = finalText;
         }
 
+        // Emit last section (F) which has no following heading to trigger detection
         const trailingSections = [...fullText.matchAll(headingPattern)];
         const lastMatch = trailingSections.at(-1);
         if (lastMatch && !emittedSections.has(lastMatch[1])) {
@@ -166,18 +144,10 @@ export async function POST(request: Request) {
           );
         }
 
-        controller.enqueue(
-          sseChunk("complete", {
-            fullText,
-          })
-        );
+        controller.enqueue(sseChunk("complete", { fullText }));
       } catch (error) {
         const message = error instanceof Error ? error.message : "Unknown evaluation error";
-        controller.enqueue(
-          sseChunk("error", {
-            message,
-          })
-        );
+        controller.enqueue(sseChunk("error", { message }));
       } finally {
         controller.close();
       }
